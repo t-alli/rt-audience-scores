@@ -1,0 +1,289 @@
+---
+title: "Movie Metrics and Rotten Tomato Audience Scores"
+output: 
+  html_document: 
+    fig_height: 4
+    highlight: pygments
+    theme: spacelab
+---
+
+## Setup
+
+### Load packages
+
+```{r load-packages, message = FALSE}
+library(ggplot2)
+library(dplyr)
+library(statsr)
+library(stringr)
+library(knitr)
+library(kableExtra)
+```
+
+### Load data
+
+```{r load-data}
+load("movies.Rdata")
+```
+
+
+
+* * *
+
+## Part 1: Data
+
+The Movies dataset contains 651 randomly sampled movies released prior to 2016. We are not given any information with regards to the methodology of the random sampling. In theory the data should be generalizable across movies as a whole. In practice, this is dependent on the sample being unbiased. Inspecting the data visually, the samples appear to have a bias towards North American and European movies, and one should exercise caution if attempting to generalize to non European/North American movies.
+
+Random assignment is not used in this dataset. Hence, the movie data cannot demonstrate causation. Any relationships between variables in the GSS will be correlatory. 
+
+* * *
+
+## Part 2: Research question - Looking at feature films, is there a relationship between the audience scores on Rotten Tomatoes and movie details such as runtime, MPAA ratings and the production studio?
+
+This paper aims to examine whether there is a quantitavely demonstrable relationship between audience scores and various movie metrics. Being able to quantify whether runtimes, MPAA ratings and the choice of production studio affect audience scores is useful as producers could use this information to make  better movies from the audience's perspective. 
+
+I'll be using the *runtime, mpaa_rating and studio* variables as the initial explanatory variables, and the *audience_score* variable as the response. 
+
+* * *
+
+## Part 3: Exploratory data analysis
+
+* * *
+
+
+```{r}
+#filter out data of interest, removing NA entries
+movie_data <- movies %>% filter(title_type == "Feature Film") %>% select(runtime, mpaa_rating, studio, audience_score) %>% na.omit()
+
+# Reorder levels of mpaa_ratings into ascending age order
+movie_data$mpaa_rating <- factor(movie_data$mpaa_rating, levels = c("G", "PG", "PG-13", "R", "NC-17", "Unrated"))
+```
+
+Firstly, I've created a new data frame containing the variables of interest. I've also ordered the *mpaa_ratings* variable. To begin, let's Look at the distribution of rotten tomato audience scores:
+
+```{r fig.width=10,fig.height=5}
+ggplot(movie_data, aes(x = audience_score)) + geom_histogram(binwidth = 10) + ggtitle("Distribution of Audience Scores")
+```
+
+The distribution is unimodal and very slightly left skewed. Due to the skewness, i'll be using the median and IQR to summarise the scores:
+
+```{r}
+movie_data %>% select(audience_score) %>% summarise(median_score = median(audience_score), lq_score = quantile(audience_score, 1/4), uq_score = quantile(audience_score, 3/4), iqr_score = IQR(audience_score)) 
+```
+
+Looking at the data, it appears that the typical film has an audience score of 63, and the middle 50% of scores fall between 45 and 78. We can group films by rating and look at how scores differ between ratings by using a boxplot:
+
+```{r fig.width=10,fig.height=5}
+movie_data %>% select(audience_score, mpaa_rating) %>% group_by(mpaa_rating) %>% ggplot(aes(x = mpaa_rating, y = audience_score,fill = mpaa_rating)) + geom_boxplot() + ggtitle("Audience Scores by MPAA Rating")
+```
+
+
+Inspecting the data visually, it appears that PG-13 movies have the lowest average rating, whilst G-rated and unrated movies have the higest scores. Looking at sample sizes:
+
+```{r}
+movie_data %>% select(audience_score, mpaa_rating) %>% group_by(mpaa_rating) %>% summarise(n = n()) 
+```
+
+There are very few movies with G, NC-17 and Unrated ratings compared to the rest, hence we should focus on PG, PG-13 and R movies when intepreting the plot above. Looking at the distribution for runtimes:
+
+```{r fig.width=10,fig.height=5}
+ggplot(movie_data, aes(x = runtime)) + geom_histogram(binwidth = 10) + ggtitle("Distribution of Runtimes")
+```
+
+This distribution is unimodal and right skewed, which makes sense. Out of all the movies you've watched, how many have been longer than 2 and a half hours? Not many, most likely. Looking at how runtimes change with ratings:
+
+```{r fig.width=10,fig.height=5}
+movie_data %>% select(runtime, mpaa_rating) %>% group_by(mpaa_rating) %>% ggplot(aes(x = mpaa_rating, y = runtime, fill = mpaa_rating)) + geom_boxplot() +  ggtitle("Runtimes by MPAA Rating")
+```
+
+It looks like PG-13 movies are the longest. Again, due to sample sizes, we should probably only consider PG, PG-13 and R movies. Is there much of a relationship between runtimes and rating? A quick and dirty scatterplot should provide some insights:
+
+```{r fig.width=10,fig.height=5}
+movie_data %>% ggplot(aes(x = runtime, y= audience_score)) + geom_point() + ggtitle("Audience Scores vs Runtimes")
+```
+
+The messy results are typical of real world data. It is very noisy and very difficult to deduce visually what is happening here. I'll be looking into this relationship in more detail in the next section, as we'll need to verify whether or not this relationship is linear. Finally, let's consider the studio variable:
+
+```{r}
+movie_data %>% select(studio) %>% group_by(studio) %>% summarise(n = n()) %>% mutate(proportion = n / sum(n)) %>% arrange(desc(proportion))
+```
+
+There are 184 studio names in the sample, with the major studios forming the top 6. An important question is whether these 184 studios are distinct, or weather there are repititions in the sample. Taking Sony Pictures as an example, we can search the studio names to find out how many distinct studios have sony in the name:
+
+```{r}
+# Return distinct studios with "sony" in the name 
+movie_data %>% select(studio) %>% group_by(studio) %>% filter(str_detect(studio, regex("sony", ignore_case=TRUE))) %>% distinct(studio)
+```
+
+We can see that there are repetitions in the sample. This will be important when considering the regression model in the next section. 
+
+* * *
+
+
+## Part 4: Modeling
+
+For the multiple regression model, i'll be using the *audience_score* variable as the response variable.
+
+With the *studio* variable, we will need to process the data to deal with the repititions described in the earlier section. Rather than trying to consider 184 levels, we can create a new variable termed *major_studio* which categorises studios based on whether they are a major film studio (or under one). The Major studios have a relative abundance of capital compared to smaller studios, and release a large number of films annunally. Partitioning the variable in this way allows us to consider whether the influence of a major studio affects audience ratings. 
+
+The current major studios are:
+
+1. Warner Bros. Entertainment
+2. Walt Disney Studios
+3. Universal Studios
+4. Fox Entertainment Group
+5. Sony Pictures
+6. Paramount 
+
+I've attempted to include the subsidiaries of major studios, however to save time (and complexity!) my list of subsidiaries is unlikely to be fully comprehensive:
+
+```{r}
+# Create new variable major_studio using search conditions
+movie_data <- movie_data %>% mutate(major_studio = as.factor(ifelse(str_detect(studio,
+regex("disney|lucasfilm|marvel|pixar|touchstone|warner|HBO|turner|universal|comcast|focus|dreamworks|fox|sony|tristar|columbia|destination|paramount|viacom",ignore_case=TRUE)),1,0)))
+```
+
+I'll be using the *mpaa_rating* variable as it is to see if the movie rating is linked to audience scores, and I'll be excluding the *studio* variable now that we have created the new *major_studio* variable for the model:
+
+```{r}
+# Remove unwanted variables
+movie_data <- movie_data %>% select(runtime, mpaa_rating, -studio, audience_score, major_studio)
+```
+
+In terms of model selection, i'll be using **forward selection** and using adjusted $R^2$ as the criterion. This is because we are mainly interested in the predictive power of the model for the next section. 
+
+```{r}
+# Run linear models
+runtime_model <- lm(audience_score ~ runtime, movie_data)
+m_studio_model <- lm(audience_score ~ major_studio, movie_data)
+mpaa_model <- lm(audience_score ~ mpaa_rating, movie_data)
+```
+
+Now we've created the first few models, the next chunk of code organises the r_squared values into a data frame and tabulates the output:
+
+```{r}
+model_name <- c("runtime_model", "m_studio_model", "mpaa_model")
+adj_r_squared <- c(summary(runtime_model)$adj.r.squared, summary(m_studio_model)$adj.r.squared,  summary(mpaa_model)$adj.r.squared)
+r_squared.data <- data.frame(model_name, adj_r_squared)
+r_squared.data %>% kable("html") %>% kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+The model using *runtime* as the explanatory variable has the largest adjusted $R^2$ value. Moving onto the next stage of the selection:
+
+```{r}
+runtime_mpaa_model <- lm(audience_score ~ mpaa_rating + runtime, movie_data)
+runtime_studio_model <- lm(audience_score ~ runtime + major_studio, movie_data)
+model_name <- c("runtime_mpaa_model", "runtime_studio_model")
+adj_r_squared <- c(summary(runtime_mpaa_model)$adj.r.squared, summary(runtime_studio_model)$adj.r.squared)
+r_squared.data <- data.frame(model_name, adj_r_squared)
+r_squared.data %>% kable("html") %>% kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+We can see that the model using the mpaa_rating and runtime variables have the largest adjusted $R^2$. Let's check to see if using all 3 variables increases the $R^2$ value:
+
+```{r}
+full_model <- lm(audience_score ~ mpaa_rating + runtime + major_studio, movie_data)
+summary(full_model)$adj.r.squared
+```
+
+The addition of the *major_studio* variable decreases the $R^2$ value and hence in the final model i'll be using *mpaa_rating* and *runtime* as the explanatory variables. 
+
+```{r}
+final_model <-lm(audience_score ~ mpaa_rating + runtime, movie_data)
+```
+
+
+Before attempting to perform inference on the model, we need to check that the model is valid.
+
+### Model Diagnostics
+
+First, let's check if the one numerical explanatory variable (runtime) is linearly related to audience scores:
+
+```{r fig.width=10,fig.height=5}
+plot(final_model$residuals ~ movie_data$runtime)
+abline(h = 0)
+```
+
+
+There appears to be relatively good degree of random scatter around 0, although the outliers are quite clear to see on the plot. Based on this plot, we can assume the relationship is linear. Let's see if the residuals are nearly normal:
+
+```{r fig.width=10,fig.height=5}
+hist(final_model$residuals)
+```
+
+Looking at the histogram, it would be a stretch to call the distribution nearly normal. The histogram is flatter and wider than we would expect if the distribution were normal. We can use the **Shapiro-Wilks Normality Test** to test for normality. The hypotheses for this test are:
+
+<li> $H_0$ - The data **is** normally distributed. </li> 
+<li> $H_A$ - The data **is not** normally distributed. </li> 
+               
+```{r}
+shapiro.test(final_model$residuals)
+```
+
+Since the P-Value is less than 0.05, we can reject the null hypothesis and are 95% confident that the data does not fit the normal distribution. We can assume that the normality condition has not been met. 
+
+```{r fig.width=10,fig.height=5}
+plot(final_model$residuals ~ final_model$fitted.values)
+```
+
+Plotting the residuals against the fitted values, there is a region that has a fan-shape, which suggests non-constant variability in residuals as the predicted values change. Transforming the response variable should help us deal with this, although for the purposes of length I won't be doing that in this paper.
+
+```{r fig.width=10,fig.height=5}
+plot(final_model$residuals)
+```
+
+The scatterplot shows random scatter, which suggests that the residuals are indepenedent. The sampled movies are therefore highly likely to be independent. 
+
+### Model Interpretation
+
+I'll be completing the rest of the paper assuming that the model is valid. A discussion around this will occur in the conclusion.
+
+```{r}
+summary(final_model)
+```
+
+The linear model can be written as:
+
+$\hat{AudienceScore}\,=$ **36.12 + 0.33runtime - 9.63mpaa:PG - 16.42mpaa:PG13 - 9.42mpaa:R + 7.71mpaa:NC17 - 0.41mpaa:Unrated**
+
+The p-value pf $4.683\times10^{-12}$, shows that the model is statistically significant. The adjusted r-squared of the model is somewhat low at 0.09647, meaning that the model explains ~9.6% of the variability in audience scores for movies. The standard error values for the coefficients are quite large, which suggests that the sample sizes are too low. 
+
+As mpaa_ratingG is missing from the model coefficients, films rated G are the reference level for the *mpaa_rating* variable. Hence, to predict the audience score for a G-rated film, the non-reference coefficients are zeroised, and the model can be written as:
+
+$\hat{AudienceScore}\,=$ **36.12 + 0.33runtime**
+
+All else held constant, the model predicts that for each 1 minute increaase in runtime, the audience score will be higher by 0.33 points on average.
+
+An intercept of 36.12 in the context of the model means that films rated G with 0 runtime are expected to have an audience score of 36.12. Of course this is meaningless in the real world as it's not possible to have a film with no runtime. 
+
+
+* * *
+
+
+## Part 5: Prediction
+
+I'll be using the model to predict an audience score for **Hail, Caesar! (2016)**. I'll be using Rotten Tomatoes as the source for [mpaa rating data](https://www.rottentomatoes.com/m/hail_caesar_2016/) and IMDB as the source for [runtime](http://www.imdb.com/title/tt0475290/technical?ref_=tt_dt_spec).
+
+```{r}
+# Create dataframe with Hail Caesar data
+h_caesar <- data.frame(runtime = 106, mpaa_rating = "PG-13")
+```
+
+Now we've got the data in a dataframe, we can perform the prediction. I'll be using the 95% confidence level. 
+
+```{r}
+predict(final_model, h_caesar, interval = "prediction", level = 0.75)
+```
+
+The model predicts with 95% confidence that the true audience score for Hail, Caesar! lies between 17.16 and 91.63. The confidence interval is based on Hail, Caesar! having a runtime of 106 minutes and an mpaa_rating of PG-13.
+
+The true audience score for this movie is 44, hence the model is not particularly accurate or precise. while the true score lies between the confidence interval, the large range of possible values shows that the model is not very useful. 
+
+## Part 6: Conclusion
+
+Based on the findings in this paper, it appears that there is a relationship between audience scores and movie runtimes and ratings. How movie studios factor into this relationship is unclear, and the model as a whole was not informative in elucidating the relationship between the variables. 
+
+The model also failed some of the conditions, which probably explains the poor predictive power of the model, and based on this analysis we cannot tell if any of the explanatory variables are collinear. This model cannot not be used in its current format to get reliable insights about how the selected variables influence audience scores. 
+
+
+
